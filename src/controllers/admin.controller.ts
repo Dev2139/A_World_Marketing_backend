@@ -28,12 +28,18 @@ export const getDashboardMetrics = async (req: Request, res: Response): Promise<
       where: { status: 'PENDING' }
     });
 
+    // Get pending orders
+    const pendingOrders = await prisma.order.count({
+      where: { status: 'PENDING' }
+    });
+
     res.json({
       totalRevenue,
       totalOrders,
       totalAgents,
       totalCustomers,
-      pendingPayouts
+      pendingPayouts,
+      pendingOrders
     });
   } catch (error) {
     console.error('Error fetching dashboard metrics:', error);
@@ -629,7 +635,17 @@ export const updateAgentStatus = async (req: Request, res: Response): Promise<vo
 // Order management
 export const getAllOrders = async (req: Request, res: Response): Promise<void> => {
   try {
+    // Extract query parameters for filtering
+    const { status } = req.query;
+    
+    // Build where clause based on query parameters
+    const whereClause: any = {};
+    if (status) {
+      whereClause.status = status as string;
+    }
+    
     const orders = await prisma.order.findMany({
+      where: whereClause,
       include: {
         product: true,
         customer: {
@@ -656,20 +672,18 @@ export const getAllOrders = async (req: Request, res: Response): Promise<void> =
     
     // Format the response to match the expected structure
     const formattedOrders = orders.map(order => {
-      const orderWithExtendedFields = order as any; // Type assertion to access extended fields
-      
       return {
         id: order.id,
         orderNumber: `ORD-${order.id.slice(-4).toUpperCase()}`,
         status: order.status,
         totalPrice: Number(order.totalPrice),
-        subtotal: orderWithExtendedFields.subtotal ? Number(orderWithExtendedFields.subtotal) : undefined,
-        tax: orderWithExtendedFields.tax ? Number(orderWithExtendedFields.tax) : undefined,
-        shipping: orderWithExtendedFields.shipping ? Number(orderWithExtendedFields.shipping) : undefined,
-        paymentMethod: orderWithExtendedFields.paymentMethod || undefined,
-        paymentDetails: orderWithExtendedFields.paymentDetails ? JSON.parse(orderWithExtendedFields.paymentDetails as string) : undefined,
-        shippingAddress: orderWithExtendedFields.shippingAddress || undefined,
-        billingAddress: orderWithExtendedFields.billingAddress || undefined,
+        subtotal: order.subtotal ? Number(order.subtotal) : undefined,
+        tax: order.tax ? Number(order.tax) : undefined,
+        shipping: order.shipping ? Number(order.shipping) : undefined,
+        paymentMethod: order.paymentMethod || undefined,
+        paymentDetails: order.paymentDetails ? (typeof order.paymentDetails === 'string' ? JSON.parse(order.paymentDetails) : order.paymentDetails) : undefined,
+        shippingAddress: order.shippingAddress || undefined,
+        billingAddress: order.billingAddress || undefined,
         createdAt: order.createdAt.toISOString(),
         items: [{
           id: order.product.id,
@@ -848,40 +862,88 @@ export const createPayout = async (req: Request, res: Response): Promise<void> =
     const userId = (req as any).user.userId; // Get the authenticated user ID
     const { amount } = req.body;
 
+    // Use hardcoded minimum payout threshold (same as in getSettings function)
+    const minimumPayoutThreshold = 50; // $50 minimum payout threshold
+
     // Validate amount
     if (!amount || amount <= 0) {
       res.status(400).json({ message: 'Valid amount is required' });
       return;
     }
 
-    // Get available commissions sorted by oldest first
-    // Available commissions are those that are APPROVED/PENDING and not linked to approved/paid payouts
-    // NOTE: Commissions linked to PENDING payouts are NOT available to prevent double-spending
-    const availableCommissions = await prisma.commission.findMany({
+    // Check if amount meets minimum threshold
+    if (amount < minimumPayoutThreshold) {
+      res.status(400).json({ message: `Minimum payout amount is $${minimumPayoutThreshold}. Please request at least $${minimumPayoutThreshold} for payout.` });
+      return;
+    }
+
+    // Calculate available commission balance similar to how the dashboard calculates it
+    // Get all commissions for the user
+    const allCommissions = await prisma.commission.findMany({
       where: {
         userId: userId,
-        status: { in: ['APPROVED', 'PENDING'] }, // Only approved or pending commissions count toward available balance
-        // Exclude commissions that are linked to approved/paid payouts (to prevent double spending)
-        // Commissions linked to pending payouts are also excluded to prevent double spending
-        payoutCommissions: {
-          none: {
-            payout: {
-              status: { in: ['APPROVED', 'PAID'] }
-            }
-          }
-        }
-      },
-      orderBy: { createdAt: 'asc' },
+        status: { in: ['PENDING', 'APPROVED', 'PAID'] }
+      }
     });
     
-    const totalAvailableCommission = availableCommissions.reduce((sum, commission) => sum + Number(commission.amount), 0);
+    // Get all payout-commission associations
+    const allPayoutCommissions = await prisma.payoutCommission.findMany({
+      where: {
+        payout: {
+          userId: userId
+        }
+      },
+      include: {
+        payout: true
+      }
+    });
+    
+    // Calculate total commission value
+    const totalCommissionValue = allCommissions.reduce((sum, commission) => sum + Number(commission.amount), 0);
+    
+    // Calculate the actual amount used in approved/paid payouts
+    const usedInProcessedPayouts = allPayoutCommissions
+      .filter(pc => pc.payout.status === 'APPROVED' || pc.payout.status === 'PAID')
+      .reduce((sum, pc) => {
+        // Add the actual payout amount, not the full commission value
+        return sum + Number(pc.payout.amount);
+      }, 0);
+    
+    // Calculate total amount requested in pending payouts
+    const pendingPayoutsResult = await prisma.payout.aggregate({
+      where: {
+        userId: userId,
+        status: 'PENDING'
+      },
+      _sum: { amount: true }
+    });
+    const totalPendingAmount = pendingPayoutsResult._sum.amount?.toNumber() || 0;
+    
+    // Calculate value of commissions currently linked to pending payouts
+    const valueOfCommissionsInPendingPayouts = allPayoutCommissions
+      .filter(pc => pc.payout.status === 'PENDING')
+      .reduce((sum, pc) => {
+        const commission = allCommissions.find(c => c.id === pc.commissionId);
+        return sum + (commission ? Number(commission.amount) : 0);
+      }, 0);
+    
+    // The effective used commission value is the minimum between:
+    // 1. Total value of commissions linked to pending payouts
+    // 2. Total amount requested in pending payouts
+    const effectivePendingUsage = Math.min(valueOfCommissionsInPendingPayouts, totalPendingAmount);
+    
+    // Calculate total used commission value (processed + effective pending)
+    const totalUsedValue = usedInProcessedPayouts + effectivePendingUsage;
+    
+    // Available commission is total minus used
+    const totalAvailableCommission = Math.max(0, totalCommissionValue - totalUsedValue);
     
     if (amount > totalAvailableCommission) {
       res.status(400).json({ message: 'Requested amount exceeds available commission balance' });
       return;
     }
-
-    // Create the payout request
+    
+    // Create the payout request first
     const payout = await prisma.payout.create({
       data: {
         userId,
@@ -890,7 +952,78 @@ export const createPayout = async (req: Request, res: Response): Promise<void> =
       }
     });
 
+    // Now we need to select commissions to link to this payout
+    // Get all commissions for the user
+    const allCommissionsForLinking = await prisma.commission.findMany({
+      where: {
+        userId: userId,
+        status: { in: ['PENDING', 'APPROVED', 'PAID'] }
+      }
+    });
+    
+    // Get all existing payout-commission associations
+    const allPayoutCommissionsForLinking = await prisma.payoutCommission.findMany({
+      where: {
+        payout: {
+          userId: userId
+        }
+      },
+      include: {
+        payout: true
+      }
+    });
+    
+    // Calculate total commission value
+    const totalCommissionValueForLinking = allCommissionsForLinking.reduce((sum, commission) => sum + Number(commission.amount), 0);
+    
+    // Calculate the actual amount used in approved/paid payouts
+    const usedInProcessedPayoutsForLinking = allPayoutCommissionsForLinking
+      .filter(pc => pc.payout.status === 'APPROVED' || pc.payout.status === 'PAID')
+      .reduce((sum, pc) => {
+        return sum + Number(pc.payout.amount);
+      }, 0);
+    
+    // Calculate total amount requested in pending payouts (excluding the one we just created)
+    const pendingPayoutsResultForLinking = await prisma.payout.aggregate({
+      where: {
+        userId: userId,
+        status: 'PENDING',
+        id: { not: payout.id }  // Exclude the payout we just created
+      },
+      _sum: { amount: true }
+    });
+    const totalOtherPendingAmountForLinking = pendingPayoutsResultForLinking._sum.amount?.toNumber() || 0;
+    
+    // Calculate value of commissions currently linked to other pending payouts
+    const valueOfCommissionsInOtherPendingPayoutsForLinking = allPayoutCommissionsForLinking
+      .filter(pc => pc.payout.status === 'PENDING' && pc.payout.id !== payout.id) // Exclude the payout we just created
+      .reduce((sum, pc) => {
+        const commission = allCommissionsForLinking.find(c => c.id === pc.commissionId);
+        return sum + (commission ? Number(commission.amount) : 0);
+      }, 0);
+    
+    // Calculate how much commission value is still available
+    const effectiveOtherPendingUsageForLinking = Math.min(valueOfCommissionsInOtherPendingPayoutsForLinking, totalOtherPendingAmountForLinking);
+    
+    // Get available commissions (those not linked to approved/paid payouts)
+    const availableCommissions = await prisma.commission.findMany({
+      where: {
+        userId: userId,
+        status: { in: ['APPROVED', 'PENDING'] }, // Only approved or pending commissions
+        // Exclude only those linked to approved/paid payouts, but allow those linked to pending
+        payoutCommissions: {
+          none: {
+            payout: {
+              status: { in: ['APPROVED', 'PAID'] }
+            }
+          }
+        }
+      },
+      orderBy: { amount: 'asc' }, // Sort by smallest amount first
+    });
+    
     // Link commissions to this payout based on the requested amount
+    // Use a best-fit approach to minimize unused commissions
     let remainingAmount = amount;
     for (const commission of availableCommissions) {
       if (remainingAmount <= 0) break;
@@ -974,8 +1107,7 @@ export const getAgentDashboardMetrics = async (req: Request, res: Response): Pro
     });
     const totalSales = totalSalesResult._sum.totalPrice?.toNumber() || 0;
 
-    // Get total commission available for withdrawal (not linked to approved/paid payouts)
-    // NOTE: Commissions linked to PENDING payouts are also not available to prevent double-spending
+    // Get all commissions for the user
     const allCommissions = await prisma.commission.findMany({
       where: {
         userId: userId,
@@ -983,42 +1115,55 @@ export const getAgentDashboardMetrics = async (req: Request, res: Response): Pro
       }
     });
     
-    // Get commissions that are linked to approved/paid payouts
-    const payoutCommissionIds = await prisma.payoutCommission.findMany({
+    // Get all payout-commission associations
+    const allPayoutCommissions = await prisma.payoutCommission.findMany({
       where: {
         payout: {
-          userId: userId,
-          status: { in: ['APPROVED', 'PAID'] }
+          userId: userId
         }
       },
-      select: {
-        commissionId: true
+      include: {
+        payout: true
       }
     });
     
-    // Also get commissions linked to pending payouts
-    const pendingPayoutCommissionIds = await prisma.payoutCommission.findMany({
+    // Calculate the total commission earned by the agent
+    // This represents all commissions that have been earned regardless of payout status
+    const totalCommissionEarned = allCommissions.reduce((sum, commission) => sum + Number(commission.amount), 0);
+    
+    // Calculate total amount that has been paid out (approved or paid)
+    const totalPaidOutAmount = allPayoutCommissions
+      .filter(pc => pc.payout.status === 'APPROVED' || pc.payout.status === 'PAID')
+      .reduce((sum, pc) => {
+        return sum + Number(pc.payout.amount);
+      }, 0);
+    
+    // Calculate total amount requested in pending payouts
+    const pendingPayoutsResult = await prisma.payout.aggregate({
       where: {
-        payout: {
-          userId: userId,
-          status: { in: ['PENDING'] }
-        }
+        userId: userId,
+        status: 'PENDING'
       },
-      select: {
-        commissionId: true
-      }
+      _sum: { amount: true }
     });
+    const totalPendingAmount = pendingPayoutsResult._sum.amount?.toNumber() || 0;
     
-    // Combine both sets of commission IDs
-    const payoutCommissionIdSet = new Set([
-      ...payoutCommissionIds.map((pc: any) => pc.commissionId),
-      ...pendingPayoutCommissionIds.map((pc: any) => pc.commissionId)
-    ]);
+    // Calculate value of commissions currently linked to pending payouts
+    const valueOfCommissionsInPendingPayouts = allPayoutCommissions
+      .filter(pc => pc.payout.status === 'PENDING')
+      .reduce((sum, pc) => {
+        const commission = allCommissions.find(c => c.id === pc.commissionId);
+        return sum + (commission ? Number(commission.amount) : 0);
+      }, 0);
     
-    // Calculate total commission excluding those linked to approved/paid/pending payouts
-    const totalCommission = allCommissions
-      .filter((commission: any) => !payoutCommissionIdSet.has(commission.id))
-      .reduce((sum: number, commission: any) => sum + Number(commission.amount), 0);
+    // The effective pending usage is the minimum between:
+    // 1. Total value of commissions linked to pending payouts
+    // 2. Total amount requested in pending payouts
+    const effectivePendingUsage = Math.min(valueOfCommissionsInPendingPayouts, totalPendingAmount);
+    
+    // Calculate available commission (not yet paid out or tied up in pending requests)
+    // This represents the commission amount that can still be requested for payout
+    const totalCommission = Math.max(0, totalCommissionEarned - totalPaidOutAmount - effectivePendingUsage);
 
     // Get pending payouts
     const pendingPayouts = await prisma.payout.count({
@@ -1216,6 +1361,103 @@ export const getAgentReferralClicks = async (req: Request, res: Response): Promi
     });
   } catch (error) {
     console.error('Error fetching agent referral clicks:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+}
+
+// Update order status
+export const updateOrderStatus = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    // Validate status
+    const validStatuses = ['PENDING', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
+    if (!validStatuses.includes(status)) {
+      res.status(400).json({ message: 'Invalid order status. Valid statuses are: PENDING, CONFIRMED, SHIPPED, DELIVERED, CANCELLED' });
+      return;
+    }
+
+    // Get the current order to check if status change is valid
+    const order = await prisma.order.findUnique({
+      where: { id },
+    });
+
+    if (!order) {
+      res.status(404).json({ message: 'Order not found' });
+      return;
+    }
+
+    // Update the order status
+    const updatedOrder = await prisma.order.update({
+      where: { id },
+      data: { status },
+      include: {
+        product: true,
+        customer: {
+          select: {
+            id: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            address: true
+          }
+        },
+        agent: {
+          select: {
+            id: true,
+            email: true,
+            firstName: true,
+            lastName: true
+          }
+        }
+      }
+    });
+
+    // If the order status is changed to CONFIRMED, SHIPPED, or DELIVERED, it contributes to revenue
+    // The dashboard will automatically reflect this when recalculating metrics
+    
+    // Format the response similar to other order responses
+    const formattedOrder = {
+      id: updatedOrder.id,
+      orderNumber: `ORD-${updatedOrder.id.slice(-4).toUpperCase()}`,
+      status: updatedOrder.status,
+      totalPrice: Number(updatedOrder.totalPrice),
+      subtotal: updatedOrder.subtotal ? Number(updatedOrder.subtotal) : undefined,
+      tax: updatedOrder.tax ? Number(updatedOrder.tax) : undefined,
+      shipping: updatedOrder.shipping ? Number(updatedOrder.shipping) : undefined,
+      paymentMethod: updatedOrder.paymentMethod || undefined,
+      paymentDetails: updatedOrder.paymentDetails ? (typeof updatedOrder.paymentDetails === 'string' ? JSON.parse(updatedOrder.paymentDetails) : updatedOrder.paymentDetails) : undefined,
+      shippingAddress: updatedOrder.shippingAddress || undefined,
+      billingAddress: updatedOrder.billingAddress || undefined,
+      createdAt: updatedOrder.createdAt.toISOString(),
+      items: [{
+        id: updatedOrder.product.id,
+        name: updatedOrder.product.name,
+        price: Number(updatedOrder.product.price),
+        quantity: updatedOrder.quantity,
+        image: updatedOrder.product.image || undefined
+      }],
+      customer: {
+        id: updatedOrder.customer.id,
+        email: updatedOrder.customer.email,
+        firstName: updatedOrder.customer.firstName || '',
+        lastName: updatedOrder.customer.lastName || '',
+        phone: updatedOrder.customer.phone || '',
+        shippingAddress: updatedOrder.customer.address || ''
+      },
+      agent: updatedOrder.agent ? {
+        id: updatedOrder.agent.id,
+        email: updatedOrder.agent.email,
+        firstName: updatedOrder.agent.firstName || '',
+        lastName: updatedOrder.agent.lastName || ''
+      } : undefined
+    };
+
+    res.json(formattedOrder);
+  } catch (error) {
+    console.error('Error updating order status:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };

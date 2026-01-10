@@ -68,9 +68,85 @@ export const handleWebhook = async (req: Request, res: Response): Promise<void> 
         const paymentIntentSucceeded = event.data.object;
         console.log(`Payment succeeded for payment intent: ${paymentIntentSucceeded.id}`);
         
-        // Update order status in database to 'CONFIRMED' or 'PAID'
+        // Update order status in database to 'CONFIRMED'
         // Extract metadata to identify the order
         const metadata = paymentIntentSucceeded.metadata;
+        
+        // In the place-order controller, we create multiple orders for each item
+        // We need to find and update those orders
+        // The agentId is passed in metadata
+        if (metadata.agentId) {
+          // Find recent pending orders for this agent/customer that match the payment amount
+          // This is a simplified approach - in production, you'd have a more reliable way to link payment intents to orders
+          try {
+            // Get all pending orders with the agent ID
+            const pendingOrders = await prisma.order.findMany({
+              where: {
+                agentId: metadata.agentId,
+                status: 'PENDING',
+                // Add time constraint to avoid updating old orders
+                createdAt: {
+                  gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // Last 24 hours
+                }
+              },
+              orderBy: {
+                createdAt: 'desc'
+              },
+              take: 10 // Limit to recent orders
+            });
+            
+            // Update the most recent pending order
+            if (pendingOrders.length > 0) {
+              const orderToUpdate = pendingOrders[0];
+              
+              await prisma.order.update({
+                where: { id: orderToUpdate.id },
+                data: { status: 'CONFIRMED' }
+              });
+              
+              console.log(`Order ${orderToUpdate.id} status updated to CONFIRMED`);
+            }
+          } catch (updateError) {
+            console.error('Error updating order status:', updateError);
+          }
+        } else {
+          // If no agentId in metadata, try to update based on payment amount
+          // This is a fallback approach
+          const paymentAmount = paymentIntentSucceeded.amount;
+          
+          try {
+            const pendingOrders = await prisma.order.findMany({
+              where: {
+                status: 'PENDING',
+                totalPrice: {
+                  gte: paymentAmount / 100 - 0.01,
+                  lte: paymentAmount / 100 + 0.01
+                },
+                createdAt: {
+                  gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // Last 24 hours
+                }
+              },
+              orderBy: {
+                createdAt: 'desc'
+              },
+              take: 10
+            });
+            
+            // Update the most recent matching pending order
+            if (pendingOrders.length > 0) {
+              const orderToUpdate = pendingOrders[0];
+              
+              await prisma.order.update({
+                where: { id: orderToUpdate.id },
+                data: { status: 'CONFIRMED' }
+              });
+              
+              console.log(`Order ${orderToUpdate.id} status updated to CONFIRMED`);
+            }
+          } catch (updateError) {
+            console.error('Error updating order status by amount:', updateError);
+          }
+        }
         break;
         
       case 'payment_intent.payment_failed':

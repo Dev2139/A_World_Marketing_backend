@@ -21,7 +21,8 @@ import {
   getSettings,
   updateSettings,
   createProductWithImages,
-  addProductImages
+  addProductImages,
+  updateOrderStatus
 } from '../controllers/admin.controller';
 import { requireAdmin } from '../middlewares/auth.middleware';
 
@@ -50,6 +51,7 @@ router.patch('/agents/:id/status', requireAdmin, updateAgentStatus);
 
 // Order routes
 router.get('/orders', requireAdmin, getAllOrders);
+router.patch('/orders/:id/status', requireAdmin, updateOrderStatus);
 
 // Commission routes
 router.get('/commissions', requireAdmin, getAllCommissions);
