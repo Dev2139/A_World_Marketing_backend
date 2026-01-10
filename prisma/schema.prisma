@@ -1,0 +1,183 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String          @id @default(uuid())
+  email          String          @unique @db.VarChar(255)
+  password       String          @db.VarChar(255)
+  role           Role
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  bankDetails    String?
+  firstName      String?
+  lastName       String?
+  mobileNumber   String?
+  commissions    Commission[]
+  orders         Order[]
+  payouts        Payout[]
+  referralClicks ReferralClick[]
+
+  @@index([email, role])
+}
+
+model Product {
+  id                   String         @id @default(uuid())
+  name                 String         @db.VarChar(255)
+  description          String?
+  price                Decimal
+  stockQuantity        Int            @default(0)
+  commissionPercentage Decimal        @default(0)
+  isActive             Boolean        @default(true)
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+  category             String?
+  image                String?
+  orders               Order[]
+  productImages        ProductImage[]
+
+  @@index([isActive])
+  @@index([category])
+}
+
+model ProductImage {
+  id        String   @id @default(uuid())
+  productId String
+  imageUrl  String
+  isPrimary Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+}
+
+model Customer {
+  id        String   @id @default(uuid())
+  email     String   @unique @db.VarChar(255)
+  firstName String   @db.VarChar(100)
+  lastName  String   @db.VarChar(100)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  address   String?
+  phone     String?
+  orders    Order[]
+
+  @@index([isActive])
+}
+
+model Order {
+  id              String       @id @default(uuid())
+  productId       String
+  customerId      String
+  agentId         String?
+  quantity        Int          @default(1)
+  totalPrice      Decimal
+  status          OrderStatus  @default(PENDING)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  billingAddress  String?
+  paymentDetails  Json?
+  paymentMethod   String?
+  shipping        Decimal?     @default(0)
+  shippingAddress String?
+  subtotal        Decimal?
+  tax             Decimal?
+  commissions     Commission[]
+  agent           User?        @relation(fields: [agentId], references: [id])
+  customer        Customer     @relation(fields: [customerId], references: [id])
+  product         Product      @relation(fields: [productId], references: [id])
+
+  @@index([status, createdAt])
+  @@index([agentId])
+}
+
+model Commission {
+  id                String             @id @default(uuid())
+  orderId           String
+  userId            String
+  amount            Decimal
+  status            CommissionStatus   @default(PENDING)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  order             Order              @relation(fields: [orderId], references: [id])
+  user              User               @relation(fields: [userId], references: [id])
+  payoutCommissions PayoutCommission[]
+
+  @@index([status, createdAt])
+  @@index([userId])
+}
+
+model Payout {
+  id                String             @id @default(uuid())
+  userId            String
+  amount            Decimal
+  status            PayoutStatus       @default(PENDING)
+  transactionId     String?
+  approvedAt        DateTime?
+  paidAt            DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  user              User               @relation(fields: [userId], references: [id])
+  payoutCommissions PayoutCommission[]
+
+  @@index([status, createdAt])
+  @@index([userId])
+}
+
+model PayoutCommission {
+  id           String     @id @default(uuid())
+  payoutId     String
+  commissionId String
+  commission   Commission @relation(fields: [commissionId], references: [id])
+  payout       Payout     @relation(fields: [payoutId], references: [id])
+
+  @@unique([payoutId, commissionId])
+}
+
+model ReferralClick {
+  id        String   @id @default(uuid())
+  agentId   String
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  agent     User     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, createdAt])
+}
+
+enum Role {
+  ADMIN
+  AGENT
+  CUSTOMER
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+enum CommissionStatus {
+  PENDING
+  APPROVED
+  PAID
+  BLOCKED
+}
+
+enum PayoutStatus {
+  PENDING
+  APPROVED
+  PAID
+  REJECTED
+}
