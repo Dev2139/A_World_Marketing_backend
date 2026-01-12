@@ -115,3 +115,6 @@ process.on('SIGINT', async () => {
   await prisma.$disconnect();
   process.exit(0);
 });
+
+
+// console.log("Hello world")
