@@ -68,14 +68,9 @@ app.use('*', (req: Request, res: Response) => {
   res.status(404).json({ message: 'Route not found' });
 });
 
-// Function to initialize the server and create default admin if not exists
-async function initializeServer() {
+// Function to initialize database and create default admin if not exists
+async function initializeDatabase() {
   try {
-    // Start the server
-    const server = app.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
-    });
-
     // Check if default admin exists, create if not
     const existingAdmin = await prisma.user.findUnique({
       where: { email: 'admin@me.com' },
@@ -101,13 +96,21 @@ async function initializeServer() {
       console.log('Default admin user already exists.');
     }
   } catch (error) {
-    console.error('Error initializing server:', error);
-    process.exit(1);
+    console.error('Error initializing database:', error);
+    // Don't exit the process, let the server continue running
+    console.log('Continuing server startup despite database initialization error...');
   }
 }
 
 // Start the server
-initializeServer();
+const server = app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+  
+  // Initialize database asynchronously after server starts
+  initializeDatabase().catch(error => {
+    console.error('Failed to initialize database:', error);
+  });
+});
 
 // Graceful shutdown
 process.on('SIGINT', async () => {

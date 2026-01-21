@@ -89,13 +89,22 @@ npm install
 ```
 
 3. Set up environment variables:
-Create a `.env` file in the server directory with the following variables:
+Copy `.env.example` to `.env` and configure:
+```bash
+cp .env.example .env
+```
+Then edit `.env` with your actual values:
 ```
 PORT=5002
 DATABASE_URL="postgresql://username:password@localhost:5432/awm_store"
-JWT_SECRET="your-super-secret-jwt-key"
-JWT_EXPIRES_IN="7d"
+ACCESS_TOKEN_SECRET="your-super-secret-access-token-key"
+REFRESH_TOKEN_SECRET="your-super-secret-refresh-token-key"
 NODE_ENV=development
+CLIENT_URL=http://localhost:3001
+FRONTEND_URL=http://localhost:3001
+STRIPE_SECRET_KEY=sk_test_xxxxxxxxxxxx
+STRIPE_PUBLISHABLE_KEY=pk_test_xxxxxxxxxxxx
+STRIPE_WEBHOOK_SECRET=whsec_xxxxxxxxxxxx
 ```
 
 4. Set up the database:
@@ -110,6 +119,43 @@ npm run dev
 ```
 
 The API server will be available at `http://localhost:5002`
+
+## Deployment
+
+### Deploying to Render
+
+The application is configured to deploy on Render. Follow these steps:
+
+1. **Create a Render Web Service**:
+   - Connect your GitHub repository
+   - Select the `server` folder as the root directory
+   - Choose Node.js as the environment
+
+2. **Configure Environment Variables**:
+   In your Render dashboard, add the following environment variables in the "Environment" section:
+   
+   ```
+   DATABASE_URL=postgresql://user:password@host:port/database
+   PORT=10000
+   NODE_ENV=production
+   ACCESS_TOKEN_SECRET=your-secret-here
+   REFRESH_TOKEN_SECRET=your-secret-here
+   CLIENT_URL=https://your-frontend-domain.com
+   FRONTEND_URL=https://your-frontend-domain.com
+   STRIPE_SECRET_KEY=sk_live_xxxxxxxxxxxx
+   STRIPE_PUBLISHABLE_KEY=pk_live_xxxxxxxxxxxx
+   STRIPE_WEBHOOK_SECRET=whsec_xxxxxxxxxxxx
+   ```
+
+3. **Build and Deploy Commands**:
+   - Build: `npm install; npm run build`
+   - Start: `node dist/server.js` or `npm start`
+
+4. **Important Notes**:
+   - Make sure your Supabase database is accessible from Render's IP range
+   - The server will start listening on a port immediately and handle database initialization asynchronously
+   - If the database is unavailable initially, the server will continue running and retry initialization
+   - Ensure your `NODE_ENV` is set to `production` for production deployments
 
 ## API Endpoints
 
